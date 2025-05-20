@@ -85,19 +85,27 @@ async fn subscribe_grpc(tx: mpsc::Sender<u64>) {
         .await
         .unwrap();
 
+    // 优化的订阅请求 - 更简洁的过滤条件
     let subscribe_request = SubscribeRequest {
         transactions: std::collections::HashMap::from([(
             "speed_test".to_string(),
             SubscribeRequestFilterTransactions {
-                vote: Some(false),
-                failed: Some(false),
-                signature: None,
-                account_include: vec![],
-                account_exclude: vec![],
-                account_required: vec![],
+                vote: Some(false),       // 忽略投票交易
+                failed: Some(false),     // 忽略失败交易
+                signature: None,         // 不按签名过滤
+                account_include: vec![], // 不包含特定账户
+                account_exclude: vec![], // 不排除特定账户
+                account_required: vec![], // 不要求特定账户
             },
         )]),
+        // 使用最快的提交级别
         commitment: Some(CommitmentLevel::Processed.into()),
+        // 不订阅其他类型的数据
+        accounts: std::collections::HashMap::new(),
+        slots: std::collections::HashMap::new(),
+        blocks: std::collections::HashMap::new(),
+        blocks_meta: std::collections::HashMap::new(),
+        entry: std::collections::HashMap::new(),
         ..Default::default()
     };
 
@@ -119,6 +127,7 @@ async fn subscribe_grpc(tx: mpsc::Sender<u64>) {
                     }
                 }
                 Some(UpdateOneof::Ping(_)) => {
+                    // 简化 ping 响应
                     let _ = subscribe_tx
                         .send(SubscribeRequest {
                             ping: Some(SubscribeRequestPing { id: 1 }),
@@ -142,9 +151,12 @@ async fn subscribe_shred(tx: mpsc::Sender<u64>) {
     let url = std::env::var("SHRED_URL").expect("SHRED_URL must be set");
     println!("正在连接 SHRED 服务: {}", url);
     
+    // 优化的 SHRED 客户端连接
     let mut client = ShredstreamProxyClient::connect(url)
         .await
         .unwrap();
+        
+    // 使用空的请求参数，接收所有 entries
     let mut stream = client
         .subscribe_entries(SubscribeEntriesRequest {})
         .await
@@ -155,9 +167,11 @@ async fn subscribe_shred(tx: mpsc::Sender<u64>) {
     println!("SHRED 服务连接成功，开始接收数据...");
     
     while let Some(slot_entry) = stream.message().await.unwrap() {
+        // 只关注 slot 变化，不处理 entries 数据
         if slot_entry.slot != last_slot {
             last_slot = slot_entry.slot;
-            let _ = tx.send(slot_entry.slot).await;
+            // 立即发送 slot 数据
+            tx.send(slot_entry.slot).await.unwrap_or_default();
         }
     }
 }
@@ -170,13 +184,13 @@ async fn main() {
     println!("  GRPC:  {}", std::env::var("GRPC_URL").unwrap_or_else(|_| "未设置".to_string()));
     println!("  SHRED: {}", std::env::var("SHRED_URL").unwrap_or_else(|_| "未设置".to_string()));
     
-    // 创建通道用于接收 slot 数据
-    let (grpc_tx, mut grpc_rx) = mpsc::channel::<u64>(100);
-    let (shred_tx, mut shred_rx) = mpsc::channel::<u64>(100);
+    // 增大通道缓冲区大小，减少背压
+    let (grpc_tx, mut grpc_rx) = mpsc::channel::<u64>(1000);
+    let (shred_tx, mut shred_rx) = mpsc::channel::<u64>(1000);
     
     // 启动订阅任务
-    tokio::spawn(subscribe_grpc(grpc_tx));
-    tokio::spawn(subscribe_shred(shred_tx));
+    let grpc_handle = tokio::spawn(subscribe_grpc(grpc_tx));
+    let shred_handle = tokio::spawn(subscribe_shred(shred_tx));
     
     // 创建 slot 跟踪器
     let mut tracker = SlotTracker::new();
@@ -200,4 +214,7 @@ async fn main() {
             }
         }
     }
+    
+    // 等待任务完成
+    let _ = tokio::join!(grpc_handle, shred_handle);
 }
