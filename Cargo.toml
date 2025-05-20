@@ -16,6 +16,10 @@ path = "src/shred.rs"
 name = "shred-vs-grpc"
 path = "src/main.rs"
 
+[[bin]]
+name = "s"
+path = "src/speed.rs"
+
 [dependencies]
 tokio = { version = "1.44.0", features = ["rt-multi-thread"] }
 tokio-stream = "0.1.17"
